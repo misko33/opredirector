@@ -8,6 +8,7 @@ import sys
 import urllib
 import re
 import os
+import tldextract
 
 from urllib.parse import urlsplit, parse_qs, urlparse
 
@@ -46,42 +47,59 @@ def validateUrl(url):
     else: return False
 
 def searchWaybackUrls(url):
+    print("Searching web.archive.org for: " + url)
     if (args.waybackSubs):
-        url = '*.' + '.'.join(urlparse(url).path.split('.')[-2:])
+        extracted = tldextract.extract(url)
+        url = "{}.{}".format(extracted.domain, extracted.suffix)
+
+    print(url)
+    sys.exit(-1)
 
     requestUrl = 'http://web.archive.org/cdx/search/cdx?url=' + url + '/*&output=json&fl=original&collapse=urlkey'
 
     r = requests.get(requestUrl)
+
+    resp = {}
+    resp["urls"] = []
+    resp["params"] = []
+
+    print(r.status_code)
+    if (r.status_code > 399):
+        return resp
+
     results = r.json()
     vulnParams = []
     urls = []
     for idx, res in enumerate(results):
         getParams = dict(parse_qs(urlsplit(res[0]).query))
-        if(len(getParams) != 0 and "=http" in res[0]):
+        if(len(getParams) != 0 and ("=http://" in res[0] or "=https://" in res[0])):
             for key, value in getParams.items():
-                if (key not in vulnParams and value[0].startswith("http")):
+                if (key not in vulnParams and (value[0].startswith("http://") or value[0].startswith("https://"))):
                     vulnParams.append(key)
                     urls.append(res[0])
                     print(str(len(vulnParams)) + ") " + res[0])
 
+    resp["urls"] = urls
+    resp["params"] = vulnParams
+
     if (len(urls) == 0):
-        print("No URLs found on web.archive.org")
-        sys.exit(-1)
+        print("No URLs found on web.archive.org for: " + url)
+        return resp
 
     userInput = None
 
     if (args.allUrls):
-        return urls
+        return resp
 
     while True:
         userInput = input("Enter url number or type A for all: ")
         if userInput == "A":
-            return urls
+            return resp
         elif userInput.isnumeric():
             if int(userInput) <= len(urls) and int(userInput) > 0:
-                return [urls[int(userInput) - 1]]
+                return {urls: [urls[int(userInput) - 1]], params: vulnParams}
 
-def processAndTestUrl(url):
+def processAndTestUrl(url, params = False):
     placeholder = {}
     
     #Dictionary of GET parameters
@@ -106,6 +124,9 @@ def processAndTestUrl(url):
     baseUrl += path
 
     for test in getParams.keys():
+        if (params and not args.allParams and test not in params):
+            continue
+            
         # If '-v' or '--verbose' is specified
         if(args.verbose):
             print("    Testing '" + str(test) + "' parameter ...")
@@ -147,6 +168,8 @@ def test_open_redirect(url):
         if("Location" in req.headers):
             if(req.headers["Location"] == redirectTest):
                 print("[+] Open redirect: " + url)
+                with open("vulnerable.txt", "a+") as myfile:
+                    myfile.write(url + "\n")
     except ConnectionError:
         print("ConnectionError detected. Target is not accessible.")
         # sys.exit(-1)
@@ -175,10 +198,10 @@ def main():
 
         # Test urls from web.archive.org
         if(args.wayback or args.waybackSubs):
-            urls = searchWaybackUrls(url)
-            for testurl in urls:
+            resp = searchWaybackUrls(url)
+            for testurl in resp["urls"]:
                 print("\n[i] Processing url: " + testurl.strip())
-                processAndTestUrl(testurl.strip())
+                processAndTestUrl(testurl.strip(), resp["params"])
 
         # Test single url
         else:
@@ -198,10 +221,10 @@ def main():
             # Search for urls on web.archive.org
             if(args.wayback or args.waybackSubs):
                 for line in lines:
-                    urls = searchWaybackUrls(line.strip())
-                    for testurl in urls:
+                    resp = searchWaybackUrls(line.strip())
+                    for testurl in resp["urls"]:
                         print("\n[i] Processing url: " + testurl.strip())
-                        processAndTestUrl(testurl.strip())
+                        processAndTestUrl(testurl.strip(), resp["params"])
 
             # Test urls one by one from a file  
             else:
@@ -210,7 +233,6 @@ def main():
                     processAndTestUrl(line.strip())
 
 if(__name__ == "__main__"):
-
     parser = argparse.ArgumentParser(description='opredirector, Open Redirection tester tool', add_help = False)
     
     generalGroup= parser.add_argument_group('GENERAL')
@@ -219,6 +241,7 @@ if(__name__ == "__main__"):
     generalGroup.add_argument('-w', action='store_true', dest='wayback', help='\t\t Search for vulnerable URLs on web.archive.org')
     generalGroup.add_argument('-ws', action='store_true', dest='waybackSubs', help='\t\t Search for vulnerable URLs with subdomains on web.archive.org')
     generalGroup.add_argument('-A', '--all', action='store_true', dest='allUrls', help='\t\t Test all URLs')
+    generalGroup.add_argument('-P', '--allParams', action='store_true', dest='allParams', help='\t\t Test all parameters')
     
     otherGroup = parser.add_argument_group('OTHER')
     otherGroup.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='\t\t Print verbose output')
